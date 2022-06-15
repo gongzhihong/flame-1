@@ -34,7 +34,7 @@ opts = dict(
         "click",
         "pyyaml",
         "numpy",
-        "scipy"
+        "scipy",
         "chumpy"  # for loading in FLAME model
     ]
 )

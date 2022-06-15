@@ -84,10 +84,10 @@ class FlameReconModel(torch.nn.Module):
             self.fixed_uv_dis = np.load(data_dir / 'fixed_displacement_256.npy')
             self.fixed_uv_dis = torch.tensor(self.fixed_uv_dis).float().to(self.device)
 
-            _, uvcoords, faces, uvfaces = load_obj(data_dir / 'head_template.obj')
-            self.faces = faces.to(self.device)
-            self.uvcoords = uvcoords
-            self.uvfaces = uvfaces
+        _, uvcoords, faces, uvfaces = load_obj(data_dir / 'head_template.obj')
+        self.faces = faces.to(self.device)
+        self.uvcoords = uvcoords
+        self.uvfaces = uvfaces
 
     def _create_submodels(self):
         """ Creates all EMOCA encoding and decoding submodels. To summarize:
@@ -159,8 +159,8 @@ class FlameReconModel(torch.nn.Module):
         if not self.dense:
             return
 
-        from ..rasterizer import CudaRasterizer
-        self.uv_rasterizer = CudaRasterizer(256, 256, device=self.device)
+        #from ..rasterizer import CudaRasterizer
+        #self.uv_rasterizer = CudaRasterizer(256, 256, device=self.device)
 
     def _encode(self, image):
         """ "Encodes" the image into FLAME parameters, i.e., predict FLAME
@@ -364,6 +364,13 @@ class FlameReconModel(torch.nn.Module):
     #                         uv_coarse_normals * (1. - self.uv_face_eye_mask)
     #     return uv_detail_normals
 
+    def get_faces(self):
+        if self.dense:
+            return self.dense_template['f']
+        else:
+            # Cast to cpu and to numpy
+            faces = self.faces.cpu().detach().numpy().squeeze()
+            return faces
 
     def __call__(self, image):
         """ Performs reconstruction of the face as a list of landmarks (vertices).

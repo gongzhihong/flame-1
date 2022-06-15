@@ -25,7 +25,7 @@ def main(directory, cpu):
     
     cfg = {}
     
-    data_dir = Path(directory)
+    data_dir = Path(directory).resolve()
     if not data_dir.is_dir():
         logger.exception(f"Directory '{directory}' does not exist!")
         exit()
