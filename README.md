@@ -2,7 +2,7 @@
 
 ## Installation
 
-See [here](https://lukas-snoek.com/medusa/getting_started/installation.html).
+See [here](https://medusa.lukas-snoek.com/medusa/getting_started/installation.html).
 
 ## Usage
 
