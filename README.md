@@ -12,6 +12,7 @@ For details on which data to download and how to do so, check [this page](https:
 ```python
 from flame.data import get_example_img
 from flame.crop import CropModel
+from flame import FlameReconModel
 
 # img = path to a standard RGB jpg image
 img = get_example_img()
