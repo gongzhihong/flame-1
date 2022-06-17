@@ -12,7 +12,7 @@ from pathlib import Path
 
 from ._encoders import ResnetEncoder
 from ._decoders import FLAME, Generator
-from .utils import vertex_normals, load_obj, face_vertices, upsample_mesh
+from .utils import vertex_normals, load_obj, upsample_mesh
 from .transform import create_viewport_matrix, create_ortho_matrix, crop_matrix_to_3d
 
 
@@ -50,6 +50,7 @@ class FlameReconModel(torch.nn.Module):
         self.img_size = img_size
         self.device = device
         self.dense = 'dense' in name
+        self.tform = np.eye(3)
         self._check()
         self._load_cfg()  # sets self.cfg
         self._crop_img_size = (224, 224)
@@ -378,8 +379,9 @@ class FlameReconModel(torch.nn.Module):
         Parameters
         ----------
         image : torch.Tensor
-            A 4D (1 x 3 x w x h) ``torch.Tensor`` representing a RGB image (and a 
-            batch dimension of 1)
+            A 4D (1 x 3 x 224 x 224) ``torch.Tensor`` representing a RGB image (and a 
+            batch dimension of 1); a singleton batch dimension will be added
+            automatically if needed
 
         Returns
         -------
@@ -399,19 +401,34 @@ class FlameReconModel(torch.nn.Module):
         To reconstruct an example, call the ``EMOCA`` object, but make sure to set the
         ``tform`` attribute first:
 
-        >>> from medusa.data import get_example_frame
-        >>> from medusa.recon import FAN
-        >>> img = get_example_frame()
-        >>> model = EMOCA(img.shape[:2], device='cpu')  # doctest: +SKIP
-        >>> fan = FAN(lm_type='2D')   # doctest: +SKIP
-        >>> cropped_img = fan.prepare_for_emoca(img) # doctest: +SKIP
-        >>> model.tform = fan.tform.params  # doctest: +SKIP
-        >>> out = model(cropped_img)  # doctest: +SKIP
-        >>> out['v'].shape    # doctest: +SKIP
+        >>> from flame.data import get_example_img
+        >>> from flame.crop import CropModel
+        >>> img = get_example_img()
+        >>> crop_model = CropModel(device='cpu')
+        >>> cropped_img = crop_model(img)
+        >>> recon_model = FlameReconModel(name='emoca-coarse', device='cpu')
+        >>> recon_model.tform = crop_model.tform.params
+        >>> out = recon_model(cropped_img)
+        >>> out['v'].shape
         (5023, 3)
-        >>> out['mat'].shape  # doctest: +SKIP
+        >>> out['mat'].shape
         (4, 4)
         """
+
+        if not torch.is_tensor(image):
+            # Expects a 1 x 224 x 224 x 3 tensor
+            image = torch.from_numpy(image).to(self.device, dtype=torch.float32)
+
+        if image.shape[0] != 1:
+            # Add singleton batch dimension
+            image = image.unsqueeze(dim=0)
+
+        if image.shape[1] != 3 and image.shape[3] == 3:
+            # Expects channels (RGB) first, not last
+            image = image.permute((0, 3, 1, 2))
+
+        if image.shape[2:] != (224, 224):
+            raise ValueError("Image should have dimensions 224 (h) x 224 (w)!")
 
         enc_dict = self._encode(image)
         dec_dict = self._decode(enc_dict)

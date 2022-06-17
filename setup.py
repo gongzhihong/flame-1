@@ -35,7 +35,9 @@ opts = dict(
         "pyyaml",
         "numpy",
         "scipy",
-        "chumpy"  # for loading in FLAME model
+        "chumpy",   # for loading in FLAME model
+        "skimage",  # for estimating crop transform
+        "face_alignment"  # for determining crop bbox
     ]
 )
 

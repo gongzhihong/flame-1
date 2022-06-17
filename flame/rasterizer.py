@@ -1,16 +1,14 @@
 import torch
 from torch.nn import Module
-from rasterize_cuda import rasterize
 
 from .recon.utils import face_vertices
 
 
 class CudaRasterizer(Module):
-    """ Alg: https://www.scratchapixel.com/lessons/3d-basic-rendering/rasterization-practical-implementation"""
+    """ A cuda-based rasterizer, adapted from the DECA implementation by YadiraF
+    (https://github.com/YadiraF/DECA/blob/master/decalib/utils/renderer.py). """
     def __init__(self, height, width=None, device='cuda'):
-        """
-        use fixed raster_settings for rendering faces
-        """
+        """ use fixed raster_settings for rendering faces. """
         super().__init__()
         
         self.h = height
@@ -43,7 +41,11 @@ class CudaRasterizer(Module):
         v[..., 2] = v[..., 2] * w/2
         f_vs = face_vertices(v, f)
 
+        # Import here instead of toplevel, so the rasterize_cuda does not necessarily
+        # have to be installed
+        from rasterize_cuda import rasterize
         rasterize(f_vs, depth_buffer, triangle_buffer, baryw_buffer, h, w)
+
         pix_to_face = triangle_buffer[:, :, :, None].long()
         bary_coords = baryw_buffer[:, :, :, None, :]
         vismask = (pix_to_face > -1).float()
