@@ -1,5 +1,7 @@
 # flame: 3D face reconstruction models based on the FLAME topology
 
+This package contains several Flame-based 3D reconstruction models (for inference only).
+
 ## Installation
 
 To install this package, first download the package from github (using `git`), then
