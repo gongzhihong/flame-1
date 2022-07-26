@@ -5,7 +5,7 @@ import numpy as np
 
 from PIL import Image
 from pathlib import Path
-from flame import FlameReconModel
+from flame import DecaReconModel
 
 
 @pytest.fixture()
@@ -24,7 +24,7 @@ def test_recon(name, device, example_img):
     if 'GITHUB_ACTIONS' in os.environ and device == 'cuda':
         return
     
-    model = FlameReconModel(name, img_size=(224, 224), device=device)
+    model = DecaReconModel(name, img_size=(224, 224), device=device)
     out = model(example_img)
     
     assert(out['mat'].shape == (4, 4))
