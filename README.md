@@ -1,5 +1,7 @@
 # flame: 3D face reconstruction models based on the FLAME topology
 
+This package contains several Flame-based 3D reconstruction models (for inference only).
+
 ## Installation
 
 To install this package, first download the package from github (using `git`), then
@@ -12,6 +14,7 @@ For details on which data to download and how to do so, check [this page](https:
 ```python
 from flame.data import get_example_img
 from flame.crop import CropModel
+from flame import FlameReconModel
 
 # img = path to a standard RGB jpg image
 img = get_example_img()
