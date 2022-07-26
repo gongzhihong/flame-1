@@ -12,7 +12,6 @@ import numpy as np
 from pathlib import Path
 from skimage.io import imread
 from skimage.transform import estimate_transform, warp
-from face_alignment import LandmarksType, FaceAlignment
 
 
 class CropModel:
@@ -31,6 +30,8 @@ class CropModel:
     model : FaceAlignment
         The initialized face alignment model from ``face_alignment``, using 2D landmarks    
     """
+    from face_alignment import LandmarksType, FaceAlignment
+
     def __init__(self, device='cuda', target_size=(224, 224)):
         self.device = device
         self.target_size = target_size

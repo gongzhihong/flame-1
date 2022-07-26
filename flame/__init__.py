@@ -1,1 +1,1 @@
-from .recon import FlameReconModel
+from .deca import DecaReconModel

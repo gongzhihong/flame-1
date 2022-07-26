@@ -10,13 +10,13 @@ import torch
 import numpy as np
 from pathlib import Path
 
-from ._encoders import ResnetEncoder
-from ._decoders import FLAME, Generator
-from .utils import vertex_normals, load_obj, upsample_mesh
-from .transform import create_viewport_matrix, create_ortho_matrix, crop_matrix_to_3d
+from .encoders import ResnetEncoder
+from ..decoders import FLAME, Generator
+from ..utils import vertex_normals, load_obj, upsample_mesh
+from ..transform import create_viewport_matrix, create_ortho_matrix, crop_matrix_to_3d
 
 
-class FlameReconModel(torch.nn.Module):
+class DecaReconModel(torch.nn.Module):
     """ A 3D face reconstruction model that uses the FLAME topology.
     
     At the moment, four different models are supported: 'deca-coarse', 'deca-dense',
@@ -44,7 +44,7 @@ class FlameReconModel(torch.nn.Module):
     torch.backends.cudnn.benchmark = True
 
     def __init__(self, name, img_size=None, device="cuda"):
-        """ Initializes an EMOCA model object. """
+        """ Initializes an DECA-like model object. """
         super().__init__()
         self.name = name
         self.img_size = img_size
