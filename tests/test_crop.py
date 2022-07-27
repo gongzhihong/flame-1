@@ -11,7 +11,7 @@ def test_recon(Model, device):
     if 'GITHUB_ACTIONS' in os.environ and device == 'cuda':
         return
     
-    img = Path(__file__).parent / 'obama2.jpeg'
+    img = Path(__file__).parent / 'obama.jpeg'
     crop_model = Model(device=device)
     out = crop_model(img)
     print(out)
