@@ -13,8 +13,8 @@ For details on which data to download and how to do so, check [this page](https:
 
 ```python
 from flame.data import get_example_img
-from flame.crop import CropModel
-from flame import FlameReconModel
+from flame.crop import FanCropModel
+from flame import DecaReconModel
 
 # img = path to a standard RGB jpg image
 img = get_example_img()
@@ -22,12 +22,12 @@ img = get_example_img()
 # Most Flame-based models (such as EMOCA and DECA) expect a cropped (224 x 224) image
 # as input (or, actually, a 1 x 3 x 224 x 224 torch Tensor), so we'll use the
 # CropModel class from the package
-crop_model = CropModel(device='cpu')
+crop_model = FanCropModel(device='cpu')
 cropped_img = crop_model(img)
 
 # Initialize reconstrution model (other options include 'emoca-dense', 'deca-coarse' and
 # 'deca-dense')
-recon_model = FlameReconModel(name='emoca-coarse', device='cpu')
+recon_model = DecaReconModel(name='emoca-coarse', device='cpu')
 
 # If we want our world matrix to be relative to the original (rather than cropped)
 # image, we need to pass the cropping matrix parameters to the model

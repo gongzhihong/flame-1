@@ -1,6 +1,7 @@
 from pathlib import Path
 from skimage import io
 
+
 def get_example_img(load=False):
     """ Loads a test image from the ``flame/data`` directory (an image generated on
     https://this-person-does-not-exist.com). 
@@ -21,5 +22,3 @@ def get_example_img(load=False):
         img = io.imread(img)
         
     return img
-    
-    

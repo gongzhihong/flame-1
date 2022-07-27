@@ -11,7 +11,7 @@ from flame import DecaReconModel
 @pytest.fixture()
 def example_img(device):
     """ Prepares an example image to be reused for the different model tests. """
-    img = np.array(Image.open(Path(__file__).parent / 'obama.jpeg'))
+    img = np.array(Image.open(Path(__file__).parent / 'obama_cropped.jpeg'))
     img = img.transpose(2, 0, 1) / 255.
     img = torch.tensor(img).float().unsqueeze(0).to(device)
     return img    

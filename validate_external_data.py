@@ -100,6 +100,7 @@ def main(directory, cpu):
 
     cfg_path = Path('./flame/data/config.yaml')
     with open(cfg_path, 'w') as f_out:
+        logger.info(f"Saving config file to {cfg_path}!")
         yaml.dump(cfg, f_out, default_flow_style=False)
 
 
