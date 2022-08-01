@@ -14,4 +14,10 @@ def test_recon(Model, device):
     img = Path(__file__).parent / 'obama.jpeg'
     crop_model = Model(device=device)
     out = crop_model(img)
-    print(out)
+    
+    if Model == FanCropModel:
+        img = crop_model.to_numpy(out, scale=127.5, mean=127.5, to_rgb=True)
+        assert(img.shape[:2] == (224, 224))
+    else:
+        img = crop_model.to_numpy(out, scale=255., mean=0, to_rgb=False)
+        assert(img.shape[:2] == (112, 112))

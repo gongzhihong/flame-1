@@ -1,73 +1,72 @@
-# class MICA(BaseModel):
-#     def __init__(self, config=None, device=None, tag='MICA'):
-#         super(MICA, self).__init__(config, device, tag)
+import torch
+import numpy as np
+import torch.nn.functional as F
+from collections import OrderedDict
 
-#         self.initialize()
+from ..core import FlameReconModel
+from ..decoders import FLAME
+from .encoders import MappingNetwork, Arcface
 
-#     def create_model(self, model_cfg):
-#         mapping_layers = model_cfg.mapping_layers
-#         pretrained_path = None
-#         if not model_cfg.use_pretrained:
-#             pretrained_path = model_cfg.arcface_pretrained_model
-#         self.arcface = Arcface(pretrained_path=pretrained_path).to(self.device)
-#         self.flameModel = Generator(512, 300, self.cfg.model.n_shape, mapping_layers, model_cfg, self.device)
 
-#     def load_model(self):
-#         model_path = os.path.join(self.cfg.output_dir, 'model.tar')
-#         if os.path.exists(self.cfg.pretrained_model_path) and self.cfg.model.use_pretrained:
-#             model_path = self.cfg.pretrained_model_path
-#         if os.path.exists(model_path):
-#             logger.info(f'[{self.tag}] Trained model found. Path: {model_path} | GPU: {self.device}')
-#             checkpoint = torch.load(model_path)
-#             if 'arcface' in checkpoint:
-#                 self.arcface.load_state_dict(checkpoint['arcface'])
-#             if 'flameModel' in checkpoint:
-#                 self.flameModel.load_state_dict(checkpoint['flameModel'])
-#         else:
-#             logger.info(f'[{self.tag}] Checkpoint not available starting from scratch!')
+class MicaReconModel(FlameReconModel):
 
-#     def model_dict(self):
-#         return {
-#             'flameModel': self.flameModel.state_dict(),
-#             'arcface': self.arcface.state_dict()
-#         }
+    # May have some speed benefits
+    torch.backends.cudnn.benchmark = True
 
-#     def parameters_to_optimize(self):
-#         return [
-#             {'params': self.flameModel.parameters(), 'lr': self.cfg.train.lr},
-#             {'params': self.arcface.parameters(), 'lr': self.cfg.train.arcface_lr},
-#         ]
+    def __init__(self, device='cuda'):
+        self.device = device
+        self._load_cfg()  # method inherited from parent
+        self._create_submodels()
+        self._load_submodels()
 
-#     def encode(self, images, arcface_imgs):
-#         codedict = {}
+    def _create_submodels(self):
+        """ Loads the submodels associated with MICA. To summarizes:
+        - `E_arcface`: predicts a 512-D embedding for a (cropped, 112x112) image
+        - `E_flame`: predicts (coarse) FLAME parameters given a 512-D embedding
+        - `D_flame`: outputs a ("coarse") mesh given shape FLAME parameters
+        """
+        self.E_arcface = Arcface().to(self.device)
+        self.E_arcface.eval()
+        self.E_flame = MappingNetwork(512, 300, 300).to(self.device)
+        self.E_flame.eval()
+        self.D_flame = FLAME(self.cfg['flame_path'], n_shape=300, n_exp=0).to(self.device)
+        self.D_flame.eval()
+        torch.set_grad_enabled(False)  # apparently speeds up forward pass, too
 
-#         codedict['arcface'] = F.normalize(self.arcface(arcface_imgs))
-#         codedict['images'] = images
+    def _load_submodels(self):
+        """ Loads the weights for the Arcface submodel as well as the MappingNetwork
+        that predicts FLAME shape parameters from the Arcface output. """
+        checkpoint = torch.load(self.cfg['mica_path'])
+        self.E_arcface.load_state_dict(checkpoint['arcface'])
+        
+        # The original weights also included the data for the FLAME model (template
+        # vertices, faces, etc), which we don't need here, because we use a common
+        # FLAME decoder model (in decoders.py)
+        new_checkpoint = OrderedDict()
+        for key, value in checkpoint['flameModel'].items():
+            # The actual mapping-network weights are stored in keys starting with
+            # regressor.
+            if 'regressor.' in key:
+                new_checkpoint[key.replace('regressor.', '')] = value
+        
+        self.E_flame.load_state_dict(new_checkpoint)
 
-#         return codedict
+    def _encode(self, image):
+        image = self._check_input(image, expected_wh=(112, 112))        
+        out_af = self.E_arcface(image)  # output of arcface
+        out_af = F.normalize(out_af)
+        return self.E_flame(out_af)
 
-#     def decode(self, codedict, epoch=0):
-#         self.epoch = epoch
+    def _decode(self, code):
 
-#         flame_verts_shape = None
-#         shapecode = None
+        v, _ = self.D_flame(code)
+        v = v.squeeze().detach().cpu()
+        out = {'v': v, 'mat': np.eye(4)}
 
-#         if not self.testing:
-#             flame = codedict['flame']
-#             shapecode = flame['shape_params'].view(-1, flame['shape_params'].shape[2])
-#             shapecode = shapecode.to(self.device)[:, :self.cfg.model.n_shape]
-#             with torch.no_grad():
-#                 flame_verts_shape, _, _ = self.flame(shape_params=shapecode)
+        return out
 
-#         identity_code = codedict['arcface']
-#         pred_canonical_vertices, pred_shape_code = self.flameModel(identity_code)
-
-#         output = {
-#             'flame_verts_shape': flame_verts_shape,
-#             'flame_shape_code': shapecode,
-#             'pred_canonical_shape_vertices': pred_canonical_vertices,
-#             'pred_shape_code': pred_shape_code,
-#             'faceid': codedict['arcface']
-#         }
-
-#         return output
+    def __call__(self, image):
+        image = self._check_input(image, expected_wh=(112, 112))
+        enc_dict = self._encode(image)
+        dec_dict = self._decode(enc_dict)
+        return dec_dict

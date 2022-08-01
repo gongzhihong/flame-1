@@ -1,3 +1,4 @@
 deca_path: /home/lukass/medusa/flame/ext_data/deca_model.tar
 emoca_path: /home/lukass/medusa/flame/ext_data/emoca.ckpt
 flame_path: /home/lukass/medusa/flame/ext_data/FLAME/generic_model.pkl
+mica_path: /home/lukass/medusa/flame/ext_data/mica.tar

@@ -12,18 +12,24 @@ or the ``insightface`` package [2]_.
        IEEE/CVF conference on computer vision and pattern recognition (pp. 5203-5212).
 """
 
+import os
 import cv2
 import math
+import contextlib
 import numpy as np
 from pathlib import Path
 from skimage.io import imread
 from skimage.transform import estimate_transform, warp
 
+from .utils import get_logger
+
+logger = get_logger()
+
 
 class BaseModel:
     
     @staticmethod
-    def to_numpy(img):
+    def to_numpy(img, scale=255, mean=0, to_rgb=False):
         """ 'Undoes' the preprocessing of the cropped image and returns an ordinary
         h x w x 3 numpy array. Useful for checking the cropping result. 
         
@@ -40,7 +46,11 @@ class BaseModel:
         """        
         
         img = img.squeeze().permute(1, 2, 0).cpu().detach().numpy()
-        img = (img * 255).astype(np.uint8)
+        img = ((img * scale) + mean).astype(np.uint8)
+        
+        if to_rgb:
+            img = img[:, :, ::-1]
+
         return img
     
     @staticmethod
@@ -52,6 +62,11 @@ class BaseModel:
             img = img.unsqueeze(0)
 
         return img
+    
+    def close(self):
+        
+        if hasattr(self, '_warned_about_multiple_faces'):
+            self._warned_about_multiple_faces = False
 
 
 class FanCropModel(BaseModel):
@@ -72,11 +87,13 @@ class FanCropModel(BaseModel):
         The initialized face alignment model from ``face_alignment``, using 2D landmarks    
     """
 
-    def __init__(self, device='cuda', target_size=(224, 224)):
+    def __init__(self, device='cuda', target_size=(224, 224), min_detection_confidence=0.5):
         from face_alignment import LandmarksType, FaceAlignment
         self.device = device
         self.target_size = target_size
-        self.model = FaceAlignment(LandmarksType._2D, device=device)
+        self.model = FaceAlignment(LandmarksType._2D, device=device,
+                                   face_detector_kwargs={'filter_threshold': min_detection_confidence})
+        self._warned_about_multiple_faces = False
 
     def _load_image(self, image):
         """Loads image using PIL if it's not already
@@ -84,6 +101,7 @@ class FanCropModel(BaseModel):
         if isinstance(image, (str, Path)):
             image = np.array(imread(image))
 
+        self.img_orig = image
         return image
 
     def _create_bbox(self, lm, scale=1.25):
@@ -112,6 +130,13 @@ class FanCropModel(BaseModel):
                 [center[0] + size / 2, center[1] + size / 2],  # top right
             ]
         )  
+
+    def _get_area(self, bbox):
+        """ Computes the area of a bounding box in pixels. """         
+        nx = bbox[2, 0] - bbox[0, 0]
+        ny = bbox[1, 1] - bbox[0, 1]
+        
+        return nx * ny
 
     def _crop(self, img_orig, bbox):
         """ Using the bounding box (`self.bbox`), crops the image by warping the image
@@ -168,15 +193,32 @@ class FanCropModel(BaseModel):
         # Estimate landmarks
         lm = self.model.get_landmarks_from_image(img_orig.copy())
         if lm is None:
-            raise ValueError("No face detected!")
+            # Try decreasing detection threshold    
+            while lm is None:
+                # Note: typo (fiter) in original face_alignment source code
+                self.face_detector.fiter_threshold -= 0.1
+                if self.face_detector.fiter_threshold < 0:
+                    raise ValueError("Could not detect any faces!")
+                lm = self.model.get_landmarks_from_image(img_orig.copy())
+        
         elif len(lm) > 1:
-            raise ValueError(f"More than one face (i.e., {len(lm)}) detected!")
+            if not self._warned_about_multiple_faces:
+                logger.warning(f"More than one face (i.e., {len(lm)}) detected; "
+                               "picking largest one!")
+                self._warned_about_multiple_faces = True
+
+            # Definitely not foolproof, but pick the face with the biggest 
+            # bounding box (alternative idea: correlate with canonical bbox)
+            bbox = [self._create_bbox(lm_) for lm_ in lm]
+            areas = np.array([self._get_area(bb) for bb in bbox])
+            idx = areas.argmax()
+            lm, bbox = lm[idx], bbox[idx]                        
         else:
             lm = lm[0]
+            bbox = self._create_bbox(lm)
         
         # Create bounding box based on landmarks, use that to crop image, and return
         # preprocessed (normalized, to tensor) image        
-        bbox = self._create_bbox(lm)
         img_crop = self._crop(img_orig, bbox)
         return self._preprocess(img_crop)
 
@@ -216,19 +258,16 @@ class FanCropModel(BaseModel):
         if f_out is None and return_rgba is False:
             raise ValueError("Either supply f_out or set return_rgb to True!")
 
-        fig, axes = plt.subplots(nrows=2, constrained_layout=True)
-        axes[0].imshow(self.img_orig)
-        axes[0].axis("off")
-        axes[0].plot(self.lm[:, 0], self.lm[:, 1], marker="o", ms=2, ls="")
+        fig, ax = plt.subplots(constrained_layout=True)
+        ax.imshow(self.img_orig)
+        ax.axis("off")
+        ax.plot(self.lm[:, 0], self.lm[:, 1], marker="o", ms=2, ls="")
 
         w = self.bbox[2, 0] - self.bbox[0, 0]
         h = self.bbox[3, 1] - self.bbox[2, 1]
         rect = Rectangle(self.bbox[0, :], w, h, facecolor="none", edgecolor="r")
-        axes[0].add_patch(rect)
-
-        axes[1].imshow(self.img_crop.astype(np.uint8))
-        axes[1].axis("off")
-
+        ax.add_patch(rect)
+    
         if f_out is not None:
             fig.savefig(f_out)
             plt.close()
@@ -260,11 +299,17 @@ class InsightFaceCropModel(BaseModel):
     
     def __init__(self, device='cuda', target_size=(112, 112)):
         """ Initialize InsightFaceCropModel. """
-        from insightface.app import FaceAnalysis
         self.device = device
         self.target_size = target_size
-        self.app = FaceAnalysis(name='antelopev2', providers=[f'{device.upper()}ExecutionProvider'])
-        self.app.prepare(ctx_id=0, det_size=(224, 224))  # must be 224x224 (not 112x112)
+        self.app = None
+        self._setup_model()
+
+    def _setup_model(self):
+        from insightface.app import FaceAnalysis
+        with open(os.devnull, "w") as f, contextlib.redirect_stdout(f):
+            # Context manager above is to suppress verbal diarrhea from insightface
+            self.app = FaceAnalysis(name='antelopev2', providers=[f'{self.device.upper()}ExecutionProvider'])
+            self.app.prepare(ctx_id=0, det_size=(224, 224))  # must be 224x224 (not 112x112)
 
     def __call__(self, image):
         import torch
@@ -283,13 +328,14 @@ class InsightFaceCropModel(BaseModel):
         # Crop to target size using keypoints (kps)
         face = Face(bbox=bbox, kps=kps, det_score=det_score)
         af_img = face_align.norm_crop(img, landmark=face.kps, image_size=self.target_size[0])
-        
+        #af_img = cv2.dnn.blobFromImages([af_img], 1.0 / 127.5, (112, 112), (127.5, 127.5, 127.5), swapRB=True)[0]
         # Channel-wise mean subtraction (- 127.5), scaling (* 1 / 127.5), BGR -> RGB
         af_img = ((af_img - 127.5) * (1 / 127.5)).transpose(2, 0, 1)
         
         # Add singleton batch dim (shape: 1 x 3 x 112 x 112), cast to device
         af_img = torch.tensor(af_img[None, ::-1, ...].copy()).to(self.device)
-        
+        #af_img = torch.tensor(af_img).cuda()[None]
+
         #deca_img = face_align.norm_crop(img, landmark=face.kps, image_size=224)
         
         return af_img

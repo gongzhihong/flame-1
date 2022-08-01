@@ -5,18 +5,21 @@ used in Medusa.
        Face Capture and Animation. *arXiv preprint arXiv:2204.11312*.
 """ 
 
-import yaml
 import torch
 import numpy as np
 from pathlib import Path
 
+from ..utils import get_logger
+from ..core import FlameReconModel
 from .encoders import ResnetEncoder
-from ..decoders import FLAME, Generator
+from ..decoders import FLAME, DetailGenerator
 from ..utils import vertex_normals, load_obj, upsample_mesh
-from ..transform import create_viewport_matrix, create_ortho_matrix, crop_matrix_to_3d
+from ..transforms import create_viewport_matrix, create_ortho_matrix, crop_matrix_to_3d
+
+logger = get_logger()
 
 
-class DecaReconModel(torch.nn.Module):
+class DecaReconModel(FlameReconModel):
     """ A 3D face reconstruction model that uses the FLAME topology.
     
     At the moment, four different models are supported: 'deca-coarse', 'deca-dense',
@@ -43,19 +46,20 @@ class DecaReconModel(torch.nn.Module):
     # May have some speed benefits
     torch.backends.cudnn.benchmark = True
 
-    def __init__(self, name, img_size=None, device="cuda"):
+    def __init__(self, name, img_size=None, device="cuda", tform=None):
         """ Initializes an DECA-like model object. """
         super().__init__()
         self.name = name
         self.img_size = img_size
         self.device = device
         self.dense = 'dense' in name
-        self.tform = np.eye(3)
+        self.tform = tform
+        self._warned_about_tform = False
         self._check()
         self._load_cfg()  # sets self.cfg
+        self._load_data()
         self._crop_img_size = (224, 224)
         self._create_submodels()
-        self._setup_renderer()
 
     def _check(self):
         """ Does some checks of the parameters. """ 
@@ -66,19 +70,15 @@ class DecaReconModel(torch.nn.Module):
         DEVICES = ['cuda', 'cpu']
         if self.device not in DEVICES:
             raise ValueError(f"Device must be in {DEVICES}, but got {self.device}!")
+        
+        if self.img_size is None:
+            logger.warning("Arg `img_size` not given; beware, cannot render recon "
+                           "on top of original image anymore (only on cropped image)")
 
-    def _load_cfg(self):
-        """Loads a (default) config file. """
+    def _load_data(self):
+        """Loads necessary data. """
         data_dir = Path(__file__).parents[1] / 'data'
-        cfg = data_dir / 'config.yaml'
 
-        if not cfg.is_file():
-            raise ValueError(f"Could not find {str(cfg)}! "
-                              "Did you run the validate_external_data.py script?")
-
-        with open(cfg, "r") as f_in:
-            self.cfg = yaml.safe_load(f_in)
-            
         if self.dense:
             self.dense_template = np.load(data_dir / 'texture_data_256.npy',
                                           allow_pickle=True, encoding='latin1').item()           
@@ -122,11 +122,11 @@ class DecaReconModel(torch.nn.Module):
             self.E_expression = ResnetEncoder(self.param_dict["n_exp"]).to(self.device)
 
         # decoders
-        self.D_flame = FLAME(self.cfg, n_shape=100, n_exp=50).to(self.device)
+        self.D_flame = FLAME(self.cfg['flame_path'], n_shape=100, n_exp=50).to(self.device)
 
         if self.dense:
             latent_dim = 128 + 50 + 3  # (n_detail, n_exp, n_cam)
-            self.D_detail = Generator(
+            self.D_detail = DetailGenerator(
                 latent_dim=latent_dim,
                 out_channels=1,
                 out_scale=0.01,
@@ -153,15 +153,6 @@ class DecaReconModel(torch.nn.Module):
         # Set everything to 'eval' (inference) mode
         self.E_flame.eval()
         torch.set_grad_enabled(False)  # apparently speeds up forward pass, too
-
-    def _setup_renderer(self):
-        """ Actually don't really need this at the moment. """ 
-        # Only need a renderer for dense reconstructions        
-        if not self.dense:
-            return
-
-        #from ..rasterizer import CudaRasterizer
-        #self.uv_rasterizer = CudaRasterizer(256, 256, device=self.device)
 
     def _encode(self, image):
         """ "Encodes" the image into FLAME parameters, i.e., predict FLAME
@@ -251,7 +242,7 @@ class DecaReconModel(torch.nn.Module):
 
         """
 
-        # "Decode" vertices (V); we'll ignore the 2d and 3d landmarks
+        # "Decode" vertices (`v`) from the predicted shape/exp/pose parameter
         v, R = self.D_flame(
             shape_params=enc_dict["shape"],
             expression_params=enc_dict["exp"],
@@ -298,6 +289,14 @@ class DecaReconModel(torch.nn.Module):
         sc = cam[0]
         S = np.array([[sc, 0, 0, 0], [0, sc, 0, 0], [0, 0, sc, 0], [0, 0, 0, 1]])
 
+        if self.tform is None:
+            if not self._warned_about_tform:
+                logger.warning("Attribute `tform` is not set, so cannot render in the "
+                               "original image space, only in cropped image space!")
+                self._warned_about_tform = True
+
+            self.tform = np.eye(3)
+
         # Now we have to do something funky. EMOCA/DECA works on cropped images. This is a problem when
         # we want to quantify motion across frames of a video because a face might move a lot (e.g.,
         # sideways) between frames, but this motion is kind of 'negated' by the crop (which will
@@ -310,12 +309,11 @@ class DecaReconModel(torch.nn.Module):
         # world to NDC space, and a viewport matrix (VP), which maps from NDC to raster space.
         # Note that we need this twice: one for the 'forward' transform (world -> crop raster space)
         # and one for the 'backward' transform (full image raster space -> world)
-
-        OP = create_ortho_matrix(*self._crop_img_size)  # forward
-        VP = create_viewport_matrix(*self._crop_img_size)  # forward
+        OP = create_ortho_matrix(*self._crop_img_size)  # forward (world -> cropped NDC)
+        VP = create_viewport_matrix(*self._crop_img_size)  # forward (cropped NDC -> cropped raster)
         CP = crop_matrix_to_3d(self.tform)  # crop matrix
-        VP_ = create_viewport_matrix(*self.img_size)  # backward
-        OP_ = create_ortho_matrix(*self.img_size)  # backward
+        VP_ = create_viewport_matrix(*self.img_size)  # backward (full NDC -> full raster)
+        OP_ = create_ortho_matrix(*self.img_size)  # backward (full NDC -> world)
 
         # Let's define the *full* transformation chain into a single 4x4 matrix
         # (Order of transformations is from right to left)
@@ -415,21 +413,10 @@ class DecaReconModel(torch.nn.Module):
         (4, 4)
         """
 
-        if not torch.is_tensor(image):
-            # Expects a 1 x 224 x 224 x 3 tensor
-            image = torch.from_numpy(image).to(self.device, dtype=torch.float32)
-
-        if image.shape[0] != 1:
-            # Add singleton batch dimension
-            image = image.unsqueeze(dim=0)
-
-        if image.shape[1] != 3 and image.shape[3] == 3:
-            # Expects channels (RGB) first, not last
-            image = image.permute((0, 3, 1, 2))
-
-        if image.shape[2:] != (224, 224):
-            raise ValueError("Image should have dimensions 224 (h) x 224 (w)!")
-
+        image = self._check_input(image, expected_wh=(224, 224))
         enc_dict = self._encode(image)
         dec_dict = self._decode(enc_dict)
         return dec_dict
+
+    def close(self):
+        pass

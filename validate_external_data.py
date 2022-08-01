@@ -97,6 +97,13 @@ def main(directory, cpu):
             torch.save(state_dict, ckpt_out)
             logger.info(f"Saving reorganized checkpoint file at {str(ckpt_out)}")
             cfg['emoca_path'] = str(ckpt_out)
+            
+    mica_model_path = data_dir / 'mica.tar'
+    if mica_model_path.is_file():
+        logger.info("MICA model is already configured!")
+        cfg['mica_path'] = str(mica_model_path)
+    else:
+        logger.warning(f'File {deca_model_path} does not exist!')
 
     cfg_path = Path('./flame/data/config.yaml')
     with open(cfg_path, 'w') as f_out:

@@ -22,11 +22,10 @@ import numpy as np
 from .lbs import lbs
 
 
-class Generator(nn.Module):
-    def __init__(
-        self, latent_dim=100, out_channels=1, out_scale=0.01, sample_mode="bilinear"
-    ):
-        super(Generator, self).__init__()
+class DetailGenerator(nn.Module):
+    def __init__(self, latent_dim=100, out_channels=1, out_scale=0.01,
+                 sample_mode="bilinear"):
+        super().__init__()
         self.out_scale = out_scale
 
         self.init_size = 32 // 4  # Initial size before upsampling
@@ -71,10 +70,10 @@ class FLAME(nn.Module):
     which outputs the a mesh and 2D/3D facial landmarks
     """
 
-    def __init__(self, config, n_shape, n_exp):
-        super(FLAME, self).__init__()
+    def __init__(self, model_path, n_shape, n_exp):
+        super().__init__()
         # print("creating the FLAME Decoder")
-        with open(config["flame_path"], "rb") as f:
+        with open(model_path, "rb") as f:
             ss = pickle.load(f, encoding="latin1")
             flame_model = Struct(**ss)
 
@@ -143,9 +142,16 @@ class FLAME(nn.Module):
             landmarks: N X number of landmarks X 3
         """
         batch_size = shape_params.shape[0]
-
         eye_pose_params = self.eye_pose.expand(batch_size, -1)
-        betas = torch.cat([shape_params, expression_params], dim=1)
+
+        if expression_params is None:
+            betas = shape_params
+        else:
+            betas = torch.cat([shape_params, expression_params], dim=1)
+    
+        if pose_params is None:
+            pose_params = torch.zeros((batch_size, 6)).to(shape_params.device)
+    
         full_pose = torch.cat(
             [
                 pose_params[:, :3],
@@ -179,9 +185,9 @@ class FLAMETex(nn.Module):
     https://github.com/TimoBolkart/BFM_to_FLAME
     """
 
-    def __init__(self, config, n_tex):
+    def __init__(self, model_path, n_tex):
         super(FLAMETex, self).__init__()
-        tex_space = np.load(config["tex_path"])
+        tex_space = np.load(model_path)
         texture_mean = tex_space["MU"].reshape(1, -1)
         texture_basis = tex_space["PC"].reshape(-1, 199)  # 199 comp
 
