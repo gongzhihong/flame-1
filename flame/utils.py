@@ -1,4 +1,5 @@
-import torch 
+import torch
+import logging
 import numpy as np
 import torch.nn.functional as F
 
@@ -112,9 +113,6 @@ def upsample_mesh(v, normals, disp_map, dense_template):
     v_dense = pixel_3d_points + offsets
 
     return v_dense
-
-
-import logging
 
 
 def get_logger(verbose="INFO"):

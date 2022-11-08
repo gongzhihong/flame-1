@@ -10,8 +10,8 @@ import numpy as np
 from pathlib import Path
 
 from ..utils import get_logger
-from ..core import FlameReconModel
-from .encoders import ResnetEncoder
+from ..base import FlameReconModel
+from .encoders import ResnetEncoder, PerceptualEncoder
 from ..decoders import FLAME, DetailGenerator
 from ..utils import vertex_normals, load_obj, upsample_mesh
 from ..transforms import create_viewport_matrix, create_ortho_matrix, crop_matrix_to_3d
@@ -63,7 +63,7 @@ class DecaReconModel(FlameReconModel):
 
     def _check(self):
         """ Does some checks of the parameters. """ 
-        MODELS = ['deca-coarse', 'deca-dense', 'emoca-coarse', 'emoca-dense']        
+        MODELS = ['spectre-coarse', 'spectre-dense', 'deca-coarse', 'deca-dense', 'emoca-coarse', 'emoca-dense']        
         if self.name not in MODELS:
             raise ValueError(f"Name must be in {MODELS}, but got {self.name}!")
         
@@ -120,6 +120,8 @@ class DecaReconModel(FlameReconModel):
 
         if 'emoca' in self.name:
             self.E_expression = ResnetEncoder(self.param_dict["n_exp"]).to(self.device)
+        elif 'spectre' in self.name:
+            self.E_expression = PerceptualEncoder()
 
         # decoders
         self.D_flame = FLAME(self.cfg['flame_path'], n_shape=100, n_exp=50).to(self.device)
@@ -144,7 +146,7 @@ class DecaReconModel(FlameReconModel):
             self.E_detail.eval()
             self.D_detail.eval()
         
-        if 'emoca' in self.name:
+        if 'emoca' in self.name or 'spectre' in self.name:
             self.E_expression.load_state_dict(checkpoint["E_expression"])    
             # for some reason E_exp should be explicitly cast to cuda
             self.E_expression.to(self.device)
@@ -200,6 +202,12 @@ class DecaReconModel(FlameReconModel):
         if 'emoca' in self.name:
             enc_dict["exp"] = self.E_expression(image)
 
+        if 'spectre' in self.name:
+            exp, jaw = self.E_expression(image)
+            enc_dict['exp'] += exp
+
+            enc_dict['pose'][:, 3:] += jaw
+
         return enc_dict
 
     def _decompose_params(self, parameters, num_dict):
@@ -252,28 +260,37 @@ class DecaReconModel(FlameReconModel):
         if self.dense:
             input_detail = torch.cat([enc_dict['pose'][:, 3:], enc_dict['exp'], enc_dict['detail']], dim=1)
             uv_z = self.D_detail(input_detail)
-            
-            normals = vertex_normals(v, self.faces.expand(1, -1, -1))
-            #uv_detail_normals = self._disp2normal(uv_z, v, normals)
             disp_map = uv_z + self.fixed_uv_dis[None, None, :, :]
-            v = upsample_mesh(v.cpu().numpy().squeeze(),
-                              normals.cpu().numpy().squeeze(),
-                              disp_map.cpu().numpy().squeeze(),
-                              self.dense_template)
-        else:
-            v = v.cpu().numpy().squeeze()
+            
+            v_dense = []
+            for i in range(uv_z.shape[0]):
+                # Haven't found a way to vectorize this
+                normals = vertex_normals(v[None, i, ...], self.faces.expand(1, -1, -1))
+                #uv_detail_normals = self._disp2normal(uv_z, v, normals)
+                disp_map = uv_z[i, ...] + self.fixed_uv_dis[None, None, :, :]
+                v_ = upsample_mesh(v[i, ...].cpu().numpy().squeeze(),
+                                   normals.cpu().numpy().squeeze(),
+                                   disp_map.cpu().numpy().squeeze(),
+                                   self.dense_template)
+                v_dense.append(v_)
+            
+            v = torch.from_numpy(np.stack(v_dense)).to(dtype=torch.float32, device=self.device)
+
+        b = v.shape[0]  # batch dim
 
         # Note that `v` is in world space, but pose (global rotation only)
         # is already applied
-        cam = enc_dict["cam"].cpu().numpy().squeeze()  # 'camera' params
+        #cam = enc_dict["cam"].cpu().numpy().squeeze()  # 'camera' params
+        cam = enc_dict['cam']
 
         # Now, let's define all the transformations of `v`
         # First, rotation has already been applied, which is stored in `R`
-        R = R.cpu().numpy().squeeze()  # global rotation matrix
+        #R = R.cpu().numpy().squeeze()  # global rotation matrix
 
         # Actually, R is per vertex (not sure why) but doesn't really differ
         # across vertices, so let's average
-        R = R.mean(axis=0)
+        #R = R.mean(axis=0)
+        R = R.mean(axis=1)
 
         # Now, translation. We are going to do something weird. EMOCA (and
         # DECA) estimate translation (and scale) parameters *of the camera*,
@@ -281,21 +298,26 @@ class DecaReconModel(FlameReconModel):
         # w.r.t. the model, not the other way around (but it is technically equivalent).
         # Because we have a fixed camera and a (possibly) moving face, we actually
         # apply translation (and scale) to the model, not the camera.
-        tx, ty = cam[1:]
-        T = np.array([[1, 0, 0, tx], [0, 1, 0, ty], [0, 0, 1, 0], [0, 0, 0, 1]])
+        #tx, ty = cam[1:]
+        #T = np.array([[1, 0, 0, tx], [0, 1, 0, ty], [0, 0, 1, 0], [0, 0, 0, 1]])
+        T = torch.eye(4, 4, device=self.device).repeat(b, 1, 1)
+        T[:, 0, 3] = cam[:, 1]
+        T[:, 1, 3] = cam[:, 2]
 
         # The same issue applies to the 'scale' parameter
         # which we'll apply to the model, too
-        sc = cam[0]
-        S = np.array([[sc, 0, 0, 0], [0, sc, 0, 0], [0, 0, sc, 0], [0, 0, 0, 1]])
-
+        #sc = cam[0]
+        #S = np.array([[sc, 0, 0, 0], [0, sc, 0, 0], [0, 0, sc, 0], [0, 0, 0, 1]])
+        sc = cam[:, 0, None, None]
+        S = torch.eye(4, 4, device=self.device).repeat(b, 1, 1) * sc
+        
         if self.tform is None:
             if not self._warned_about_tform:
                 logger.warning("Attribute `tform` is not set, so cannot render in the "
                                "original image space, only in cropped image space!")
                 self._warned_about_tform = True
 
-            self.tform = np.eye(3)
+            self.tform = torch.eye(3).repeat(b, 1, 1)#np.eye(3)
 
         # Now we have to do something funky. EMOCA/DECA works on cropped images. This is a problem when
         # we want to quantify motion across frames of a video because a face might move a lot (e.g.,
@@ -309,23 +331,26 @@ class DecaReconModel(FlameReconModel):
         # world to NDC space, and a viewport matrix (VP), which maps from NDC to raster space.
         # Note that we need this twice: one for the 'forward' transform (world -> crop raster space)
         # and one for the 'backward' transform (full image raster space -> world)
-        OP = create_ortho_matrix(*self._crop_img_size)  # forward (world -> cropped NDC)
-        VP = create_viewport_matrix(*self._crop_img_size)  # forward (cropped NDC -> cropped raster)
-        CP = crop_matrix_to_3d(self.tform)  # crop matrix
-        VP_ = create_viewport_matrix(*self.img_size)  # backward (full NDC -> full raster)
-        OP_ = create_ortho_matrix(*self.img_size)  # backward (full NDC -> world)
+        OP = create_ortho_matrix(*self._crop_img_size, batch_size=b)  # forward (world -> cropped NDC)
+        VP = create_viewport_matrix(*self._crop_img_size, batch_size=b)  # forward (cropped NDC -> cropped raster)
+        #CP = crop_matrix_to_3d(self.tform)  # crop matrix
+        VP_ = create_viewport_matrix(*self.img_size, batch_size=b)  # backward (full NDC -> full raster)
+        OP_ = create_ortho_matrix(*self.img_size, batch_size=b)  # backward (full NDC -> world)
 
         # Let's define the *full* transformation chain into a single 4x4 matrix
         # (Order of transformations is from right to left)
         # Again, I can't believe this actually works
         pose = S @ T
-        forward = np.linalg.inv(CP) @ VP @ OP
-        backward = np.linalg.inv((VP_ @ OP_))
+        forward = VP @ OP#np.linalg.inv(CP) @ VP @ OP
+        backward = torch.inverse(VP_ @ OP_)##np.linalg.inv((VP_ @ OP_))
         mat = backward @ forward @ pose
 
         # Change to homogenous coordinates and apply transformation
-        v = np.c_[v, np.ones(v.shape[0])] @ mat.T
-        v = v[:, :3]  # trim off 4th dim
+        #v = np.c_[v, np.ones(v.shape[0])] @ mat.T
+        #v = v[:, :3]  # trim off 4th dim
+        hmg = torch.ones(b, v.shape[1], 1, device=self.device, dtype=torch.float32)
+        v = torch.cat([v, hmg], dim=2) @ mat.mT
+        v = v[:, :, :3]
 
         # To complete the full transformation matrix, we need to also
         # add the rotation (which was already applied to the data by the
@@ -363,15 +388,7 @@ class DecaReconModel(FlameReconModel):
     #                         uv_coarse_normals * (1. - self.uv_face_eye_mask)
     #     return uv_detail_normals
 
-    def get_faces(self):
-        if self.dense:
-            return self.dense_template['f']
-        else:
-            # Cast to cpu and to numpy
-            faces = self.faces.cpu().detach().numpy().squeeze()
-            return faces
-
-    def __call__(self, image):
+    def __call__(self, images):
         """ Performs reconstruction of the face as a list of landmarks (vertices).
 
         Parameters
@@ -413,9 +430,24 @@ class DecaReconModel(FlameReconModel):
         (4, 4)
         """
 
-        image = self._check_input(image, expected_wh=(224, 224))
-        enc_dict = self._encode(image)
+        image = self._check_input(images, expected_wh=(224, 224))
+        
+        if 'spectre' in self.name:
+
+            if images.shape[0] < 5:
+                raise ValueError("Each batch should be >= 5!")
+
+            pre = images[None, 0, ...]
+            post = images[None, -1, ...]
+            images = torch.cat([pre, pre, images, post, post])
+        
+        enc_dict = self._encode(images)
         dec_dict = self._decode(enc_dict)
+        
+        if 'spectre' in self.name:
+            for key in dec_dict.keys():
+                dec_dict[key] = dec_dict[key][2:-2, ...]
+
         return dec_dict
 
     def close(self):

@@ -15,7 +15,8 @@ or the ``insightface`` package [2]_.
 import os
 import cv2
 import math
-import contextlib
+import torch
+import contextlib        
 import numpy as np
 from pathlib import Path
 from skimage.io import imread
@@ -45,7 +46,7 @@ class BaseModel:
             A 224 x 224 x 3 numpy array with uint8 values
         """        
         
-        img = img.squeeze().permute(1, 2, 0).cpu().detach().numpy()
+        img = img.permute(0, 2, 3, 1).cpu().detach().numpy()
         img = ((img * scale) + mean).astype(np.uint8)
         
         if to_rgb:
@@ -53,20 +54,34 @@ class BaseModel:
 
         return img
     
-    @staticmethod
-    def to_torch(img, scale=255., device='cuda', add_batch_dim=True):
-        import torch
-        img = img.transpose(2, 0, 1) / scale
-        img = torch.tensor(img).float().to(device)
-        if add_batch_dim:
-            img = img.unsqueeze(0)
-
-        return img
-    
     def close(self):
         
         if hasattr(self, '_warned_about_multiple_faces'):
             self._warned_about_multiple_faces = False
+
+    def load_images(self, image_path, channels_first=True, to_bgr=False, to_torch=True):
+        """ Utility function to load images from paths if the model is not provided
+        with a [batch, w, h, 3] tensor. """
+        if isinstance(image_path, (str, Path)):
+            image_path = [image_path]
+
+        images = []
+        for img_path in image_path:
+            
+            images.append(imread(img_path))
+            
+        images = np.stack(images)
+        if to_bgr:
+            images = images[:, :, :, ::-1]
+
+        if channels_first:
+            images = images.transpose(0, 3, 1, 2)
+
+        if to_torch:       
+            images = torch.from_numpy(images)
+            images = images.to(dtype=torch.float32, device=self.device)
+
+        return images
 
 
 class FanCropModel(BaseModel):
@@ -94,15 +109,6 @@ class FanCropModel(BaseModel):
         self.model = FaceAlignment(LandmarksType._2D, device=device,
                                    face_detector_kwargs={'filter_threshold': min_detection_confidence})
         self._warned_about_multiple_faces = False
-
-    def _load_image(self, image):
-        """Loads image using PIL if it's not already
-        a numpy array."""
-        if isinstance(image, (str, Path)):
-            image = np.array(imread(image))
-
-        self.img_orig = image
-        return image
 
     def _create_bbox(self, lm, scale=1.25):
         """ Creates a bounding box (bbox) based on the landmarks by creating
@@ -144,22 +150,23 @@ class FanCropModel(BaseModel):
         image. """
         w, h = self.target_size
         dst = np.array([[0, 0], [0, w - 1], [h - 1, 0]])
-        self.tform = estimate_transform("similarity", bbox[:3, :], dst)
+        tform = estimate_transform("similarity", bbox[:3, :], dst)
 
         # Note to self: preserve_range needs to be True, because otherwise `warp` will scale the data!
-        return warp(img_orig, self.tform.inverse, output_shape=(w, h), preserve_range=True)
+        img_crop = warp(img_orig, tform.inverse, output_shape=(w, h), preserve_range=True)
+        return img_crop, tform
 
-    def _preprocess(self, img_crop):
+    def _preprocess(self, img_crop, tform):
         """ Transposes (channels, width, height), rescales (/255) the data,
         casts the data to torch, and add a batch dimension (`unsqueeze`). """
-
-        import torch
-        img_crop = img_crop.transpose(2, 0, 1)
+        
+        img_crop = img_crop.transpose(0, 3, 1, 2)
         img_crop = img_crop / 255.0
         img_crop = torch.tensor(img_crop, dtype=torch.float32).to(self.device)
-        return img_crop.unsqueeze(0)  # add singleton batch dim
+        tform = torch.tensor(tform, dtype=torch.float32).to(self.device)
+        return img_crop, tform
 
-    def __call__(self, image):
+    def __call__(self, images):
         """ Runs all steps of the cropping / preprocessing pipeline
         necessary for use with Flame-based models such as DECA/EMOCA. 
         
@@ -187,40 +194,39 @@ class FanCropModel(BaseModel):
         torch.Size([1, 3, 224, 224])
         """
 
-        # Load image if not already a h x w x 3 numpy array
-        img_orig = self._load_image(image)
+        if isinstance(images, (str, list, Path)):
+            images = self.load_images(images)
 
         # Estimate landmarks
-        lm = self.model.get_landmarks_from_image(img_orig.copy())
-        if lm is None:
-            # Try decreasing detection threshold    
-            while lm is None:
-                # Note: typo (fiter) in original face_alignment source code
-                self.face_detector.fiter_threshold -= 0.1
-                if self.face_detector.fiter_threshold < 0:
-                    raise ValueError("Could not detect any faces!")
-                lm = self.model.get_landmarks_from_image(img_orig.copy())
-        
-        elif len(lm) > 1:
-            if not self._warned_about_multiple_faces:
-                logger.warning(f"More than one face (i.e., {len(lm)}) detected; "
-                               "picking largest one!")
-                self._warned_about_multiple_faces = True
+        lms = self.model.get_landmarks_from_batch(images)
+        img_crop = np.zeros((len(lms), *self.target_size, 3))
+        tform = np.zeros((len(lms), 3, 3))
 
-            # Definitely not foolproof, but pick the face with the biggest 
-            # bounding box (alternative idea: correlate with canonical bbox)
-            bbox = [self._create_bbox(lm_) for lm_ in lm]
-            areas = np.array([self._get_area(bb) for bb in bbox])
-            idx = areas.argmax()
-            lm, bbox = lm[idx], bbox[idx]                        
-        else:
-            lm = lm[0]
+        for i, lm in enumerate(lms):
+            # print(lm.shape)
+            # if len(lm) > 1:
+            #     if not self._warned_about_multiple_faces:
+            #         logger.warning(f"More than one face (i.e., {len(lm)}) detected; "
+            #                     "picking largest one!")
+            #         self._warned_about_multiple_faces = True
+
+            #     # Definitely not foolproof, but pick the face with the biggest 
+            #     # bounding box (alternative idea: correlate with canonical bbox)
+            #     bbox = [self._create_bbox(lm_) for lm_ in lm]
+            #     areas = np.array([self._get_area(bb) for bb in bbox])
+            #     idx = areas.argmax()
+            #     lm, bbox = lm[idx], bbox[idx]                        
+            # else:
+            #    lm = lm[0]
             bbox = self._create_bbox(lm)
-        
-        # Create bounding box based on landmarks, use that to crop image, and return
-        # preprocessed (normalized, to tensor) image        
-        img_crop = self._crop(img_orig, bbox)
-        return self._preprocess(img_crop)
+            
+            # Create bounding box based on landmarks, use that to crop image, and return
+            # preprocessed (normalized, to tensor) image
+            img_orig = images[i, ...].cpu().numpy().transpose(1, 2, 0)
+            img_crop[i, ...], tform[i, ...] = self._crop(img_orig, bbox)
+            
+        img_crop, tform = self._preprocess(img_crop, tform)
+        return img_crop, tform
 
     def viz_qc(self, f_out=None, return_rgba=False):
         """ Visualizes the inferred 3D landmarks & bounding box, as well as the final
@@ -297,48 +303,55 @@ class InsightFaceCropModel(BaseModel):
         for MICA
     """    
     
-    def __init__(self, device='cuda', target_size=(112, 112)):
+    def __init__(self, name='buffalo_l', det_size=(224, 224), target_size=(112, 112), det_thresh=0.1, device='cuda'):
         """ Initialize InsightFaceCropModel. """
-        self.device = device
+        self.name = name
+        self.det_size = det_size
         self.target_size = target_size
-        self.app = None
-        self._setup_model()
+        self.det_thresh = det_thresh
+        self.device = device
+        self.app = self._setup_model()
 
     def _setup_model(self):
         from insightface.app import FaceAnalysis
         with open(os.devnull, "w") as f, contextlib.redirect_stdout(f):
             # Context manager above is to suppress verbal diarrhea from insightface
-            self.app = FaceAnalysis(name='antelopev2', providers=[f'{self.device.upper()}ExecutionProvider'])
-            self.app.prepare(ctx_id=0, det_size=(224, 224))  # must be 224x224 (not 112x112)
+            app = FaceAnalysis(name=self.name, providers=[f'{self.device.upper()}ExecutionProvider'])
+            app.prepare(ctx_id=0, det_size=self.det_size, det_thresh=self.det_thresh)
 
-    def __call__(self, image):
-        import torch
+        return app
+
+    def __call__(self, images):
+        
         from insightface.app.common import Face
         from insightface.utils import face_align
         
-        img = cv2.imread(str(image))
-        bboxes, kpss = self.app.det_model.detect(img, max_num=0, metric='default')
-        i = self._get_center(bboxes, img)
-        bbox = bboxes[i, 0:4]
-        det_score = bboxes[i, 4]
-        kps = None
-        if kpss is not None:
-            kps = kpss[i]
-        
-        # Crop to target size using keypoints (kps)
-        face = Face(bbox=bbox, kps=kps, det_score=det_score)
-        af_img = face_align.norm_crop(img, landmark=face.kps, image_size=self.target_size[0])
-        #af_img = cv2.dnn.blobFromImages([af_img], 1.0 / 127.5, (112, 112), (127.5, 127.5, 127.5), swapRB=True)[0]
-        # Channel-wise mean subtraction (- 127.5), scaling (* 1 / 127.5), BGR -> RGB
-        af_img = ((af_img - 127.5) * (1 / 127.5)).transpose(2, 0, 1)
-        
-        # Add singleton batch dim (shape: 1 x 3 x 112 x 112), cast to device
-        af_img = torch.tensor(af_img[None, ::-1, ...].copy()).to(self.device)
-        #af_img = torch.tensor(af_img).cuda()[None]
+        if isinstance(images, (str, list, Path)):
+            images = self.load_images(images, to_bgr=True, channels_first=False, to_torch=False)
 
-        #deca_img = face_align.norm_crop(img, landmark=face.kps, image_size=224)
-        
-        return af_img
+        img_crop = []
+        for i in range(images.shape[0]):
+            image = images[i, ...]
+            bboxes, kpss = self.app.det_model.detect(image, max_num=0, metric='default')
+            i = self._get_center(bboxes, image)
+            bbox = bboxes[i, 0:4]
+            det_score = bboxes[i, 4]
+            kps = None
+            if kpss is not None:
+                kps = kpss[i]
+            
+            # Crop to target size using keypoints (kps)
+            face = Face(bbox=bbox, kps=kps, det_score=det_score)
+            img_ = face_align.norm_crop(image, landmark=face.kps, image_size=self.target_size[0])
+            #af_img = cv2.dnn.blobFromImages([af_img], 1.0 / 127.5, (112, 112), (127.5, 127.5, 127.5), swapRB=True)[0]
+            img_crop.append(img_)
+ 
+        img_crop = np.stack(img_crop)[:, :, :, ::-1]
+        # Channel-wise mean subtraction (- 127.5), scaling (* 1 / 127.5), BGR -> RGB
+        img_crop = ((img_crop - 127.5) / 127.5).transpose(0, 3, 1, 2)
+        img_crop = torch.from_numpy(img_crop).to(self.device)
+ 
+        return img_crop
 
     def _dist(self, p1, p2):
         return math.sqrt(((p1[0] - p2[0]) ** 2) + ((p1[1] - p2[1]) ** 2))

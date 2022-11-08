@@ -1,10 +1,10 @@
 import yaml
 import torch
 from pathlib import Path
-from abc import ABCMeta, abstractmethod
+from .data import get_template_flame
 
 
-class FlameReconModel(metaclass=ABCMeta):
+class FlameReconModel:
 
     def _load_cfg(self):
         """ Loads a (default) config file. """
@@ -27,14 +27,14 @@ class FlameReconModel(metaclass=ABCMeta):
         # Check data type       
         image = image.to(dtype=dtype)
 
-        if image.shape[0] != 1:
-            # Add singleton batch dimension
-            image = image.unsqueeze(dim=0)
-
+        if image.dim == 3:
+            if image.size(0) == 3:
+                image = image.unsqueeze(dim=0)
+        
         if image.shape[1] != 3 and image.shape[3] == 3:
             # Expects channels (RGB) first, not last
             image = image.permute((0, 3, 1, 2))
-
+        
         if image.shape[2:] != expected_wh:
             w, h = expected_wh
             raise ValueError(f"Image should have dimensions {w} (w) x {h} (h)!")
@@ -42,14 +42,15 @@ class FlameReconModel(metaclass=ABCMeta):
         return image
 
     def get_faces(self):
-        
+        """ Retrieves the faces (polygons) associated with the predicted vertex mesh. """
         if hasattr(self, 'dense'):
-            if self.dense:
-                return self.dense_template['f']
-        else:   
-            # Cast to cpu and to numpy
-            faces = self.faces.cpu().detach().numpy().squeeze()
-            return faces
+            dense = self.dense
+        else:
+            # Assume that we're using the coarse version (e.g., for MICA)
+            dense = False
+
+        template = get_template_flame(dense=dense)
+        return template['f']
 
     def close(self):
         

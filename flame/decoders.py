@@ -15,9 +15,9 @@
 
 import pickle
 import torch
+import numpy as np
 import torch.nn as nn
 import torch.nn.functional as F
-import numpy as np
 
 from .lbs import lbs
 
@@ -77,11 +77,10 @@ class FLAME(nn.Module):
             ss = pickle.load(f, encoding="latin1")
             flame_model = Struct(**ss)
 
+        self.faces = to_np(flame_model.f, dtype=np.int64)
         self.dtype = torch.float32
-        self.register_buffer(
-            "faces_tensor",
-            to_tensor(to_np(flame_model.f, dtype=np.int64), dtype=torch.long),
-        )
+        self.register_buffer("faces_tensor", to_tensor(self.faces, dtype=torch.long))
+
         # The vertices of the template model
         self.register_buffer(
             "v_template", to_tensor(to_np(flame_model.v_template), dtype=self.dtype)
@@ -116,15 +115,6 @@ class FLAME(nn.Module):
         self.register_parameter(
             "neck_pose", nn.Parameter(default_neck_pose, requires_grad=False)
         )
-
-        neck_kin_chain = []
-        NECK_IDX = 1
-        curr_idx = torch.tensor(NECK_IDX, dtype=torch.long)
-        while curr_idx != -1:
-            neck_kin_chain.append(curr_idx)
-            curr_idx = self.parents[curr_idx]
-
-        self.register_buffer("neck_kin_chain", torch.stack(neck_kin_chain))
 
     def forward(
         self,

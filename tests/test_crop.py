@@ -16,8 +16,9 @@ def test_recon(Model, device):
     out = crop_model(img)
     
     if Model == FanCropModel:
-        img = crop_model.to_numpy(out, scale=127.5, mean=127.5, to_rgb=True)
-        assert(img.shape[:2] == (224, 224))
+        img_crop = out[0]
+        img_crop = crop_model.to_numpy(img_crop, scale=127.5, mean=127.5, to_rgb=True)
+        assert(img_crop.shape[1:] == (224, 224, 3))
     else:
         img = crop_model.to_numpy(out, scale=255., mean=0, to_rgb=False)
-        assert(img.shape[:2] == (112, 112))
+        assert(img.shape[1:] == (112, 112, 3))

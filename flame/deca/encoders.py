@@ -12,9 +12,10 @@
 #
 # For comments or questions, please email us at deca@tue.mpg.de
 # For commercial licensing contact, please contact ps-license@tuebingen.mpg.de
-
+import torch
 import numpy as np
 import torch.nn as nn
+from torch.nn import functional as F
 
 
 class ResNet(nn.Module):
@@ -158,7 +159,7 @@ class BasicBlock(nn.Module):
 
 class ResnetEncoder(nn.Module):
     def __init__(self, outsize, last_op=None):
-        super(ResnetEncoder, self).__init__()
+        super().__init__()
         feature_size = 2048
         self.encoder = ResNet(Bottleneck, [3, 4, 6, 3])
 
@@ -173,3 +174,33 @@ class ResnetEncoder(nn.Module):
         if self.last_op:
             parameters = self.last_op(parameters)
         return parameters
+
+
+class PerceptualEncoder(nn.Module):
+    # For spectre
+    def __init__(self):
+        super().__init__()
+        self.encoder = torch.hub.load('pytorch/vision:v0.8.1', 'mobilenet_v2', weights='MobileNet_V2_Weights.IMAGENET1K_V1')
+        
+        self.temporal = nn.Sequential(
+            nn.Conv1d(in_channels=1280, out_channels=256, kernel_size=5, stride=1, padding=2),
+            nn.BatchNorm1d(256),
+            nn.ReLU()
+        )
+
+        self.layers = nn.Sequential(
+            nn.Linear(256, 53),
+        )
+
+    def forward(self, inputs):
+        
+        features = self.encoder.features(inputs)
+        features = nn.functional.adaptive_avg_pool2d(features, (1, 1)).squeeze(-1).squeeze(-1)
+
+        features = features.permute(1,0).unsqueeze(0)
+        features = self.temporal(features)
+        features = features.squeeze(0).permute(1,0)
+        parameters = self.layers(features)
+        parameters[...,50] = F.relu(parameters[...,50]) 
+
+        return parameters[...,:50], parameters[...,50:]

@@ -1,4 +1,6 @@
 import os
+os.environ['PYOPENGL_PLATFORM'] = 'egl'
+
 import torch
 import pytest
 import numpy as np
@@ -29,7 +31,7 @@ def example_img(name, device):
     return img    
 
 
-@pytest.mark.parametrize("name", ['mica', 'deca-coarse', 'deca-dense', 'emoca-coarse', 'emoca-dense'])
+@pytest.mark.parametrize("name", ['spectre-coarse', 'mica', 'deca-coarse', 'deca-dense', 'emoca-coarse', 'emoca-dense'])
 @pytest.mark.parametrize("device", ['cuda', 'cpu'])
 def test_deca_recon(name, device, example_img):
 
@@ -45,6 +47,14 @@ def test_deca_recon(name, device, example_img):
     
     assert(out['mat'].shape == (4, 4))
     
+    if name == 'spectre-coarse':
+        from medusa.render import Renderer
+        cam_mat = np.eye(4)
+        cam_mat[2, 3] = 4 
+        r = Renderer(viewport=(224, 224), wireframe=False, cam_mat=cam_mat)
+        img = r(out['v'], model.get_faces())
+        Image.fromarray(img).save('test.png')
+
     if 'dense' in name:
         assert(out['v'].shape == (59315, 3))
     else:

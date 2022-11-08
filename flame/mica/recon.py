@@ -3,17 +3,26 @@ import numpy as np
 import torch.nn.functional as F
 from collections import OrderedDict
 
-from ..core import FlameReconModel
+from ..base import FlameReconModel
 from ..decoders import FLAME
 from .encoders import MappingNetwork, Arcface
 
 
 class MicaReconModel(FlameReconModel):
+    """ A simplified implementation of the MICA 3D face reconstruction model
+    (https://zielon.github.io/mica/), for inference only.
+
+    Parameters
+    ----------
+    device : str
+        Either 'cuda' (uses GPU) or 'cpu'
+    """
 
     # May have some speed benefits
     torch.backends.cudnn.benchmark = True
 
     def __init__(self, device='cuda'):
+        """ Initializes a MicaReconModel object. """
         self.device = device
         self._load_cfg()  # method inherited from parent
         self._create_submodels()
@@ -52,21 +61,38 @@ class MicaReconModel(FlameReconModel):
         self.E_flame.load_state_dict(new_checkpoint)
 
     def _encode(self, image):
-        image = self._check_input(image, expected_wh=(112, 112))        
+        """ Encodes an image into a set of FLAME shape parameters. """ 
         out_af = self.E_arcface(image)  # output of arcface
         out_af = F.normalize(out_af)
-        return self.E_flame(out_af)
+        shape_code = self.E_flame(out_af)
+        return shape_code
 
-    def _decode(self, code):
-
-        v, _ = self.D_flame(code)
-        v = v.squeeze().detach().cpu()
-        out = {'v': v, 'mat': np.eye(4)}
-
-        return out
+    def _decode(self, shape_code):
+        """Decodes the shape code into a set of vertices following the (coarse) FLAME
+        topology. """ 
+        v, _ = self.D_flame(shape_code)
+        v = v.squeeze().detach().cpu().numpy()
+        return v
 
     def __call__(self, image):
+        """ Performs 3D reconstruction on the supplied image.
+        
+        Parameters
+        ----------
+        image : np.ndarray, torch.Tensor
+            Ideally, a numpy array or torch tensor of shape 1 x 3 x 112 x 112
+            (1, C, W, H), representing a cropped image as done by the
+            InsightFaceCroppingModel
+            
+        Returns
+        -------
+        out : dict
+            A dictionary with two keys: ``"v"``, the reconstructed vertices (5023 in 
+            total) and ``"mat"``, a 4x4 Numpy array representing the local-to-world
+            matrix, which is in the case of MICA the identity matrix
+        """
         image = self._check_input(image, expected_wh=(112, 112))
-        enc_dict = self._encode(image)
-        dec_dict = self._decode(enc_dict)
-        return dec_dict
+        shape_code = self._encode(image)
+        v = self._decode(shape_code)
+        out = {'v': v, 'mat': np.eye(4)}
+        return out

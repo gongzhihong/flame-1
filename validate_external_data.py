@@ -105,6 +105,13 @@ def main(directory, cpu):
     else:
         logger.warning(f'File {deca_model_path} does not exist!')
 
+    spectre_model_path = data_dir / 'spectre_model.tar'
+    if spectre_model_path.is_file():
+        logging.info("Spectre model is already configured!")
+        cfg['spectre_path'] = str(spectre_model_path)
+    else:
+        logger.warning(f'File {spectre_model_path} does not exist!')
+
     cfg_path = Path('./flame/data/config.yaml')
     with open(cfg_path, 'w') as f_out:
         logger.info(f"Saving config file to {cfg_path}!")
